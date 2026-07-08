@@ -97,7 +97,7 @@ export function wrapToolRun(
     const pool = await environmentManager.getConnection(policy.name);
 
     // Check for active transaction and inject it
-    let transaction: import("mssql").Transaction | undefined;
+    let transaction: import("mssql/msnodesqlv8").Transaction | undefined;
     if (transactionManager?.hasActiveTransaction(policy.name)) {
       const activeTxn = transactionManager.getTransaction(policy.name)!;
       transaction = activeTxn.transaction;

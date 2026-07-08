@@ -1,5 +1,6 @@
-import sql from "mssql";
+import sql from "mssql/msnodesqlv8.js";
 import { Tool } from "@modelcontextprotocol/sdk/types.js";
+import { getEnvironmentManager } from "../config/EnvironmentManager.js";
 
 interface DependencyReference {
   name: string;
@@ -50,6 +51,10 @@ export class InspectDependenciesTool implements Tool {
         type: "boolean",
         description: "Include column-level dependency details. Default: false",
       },
+      database: {
+        type: "string",
+        description: "Optional: Target database name for server-level access environments.",
+      },
       environment: {
         type: "string",
         description: "Optional environment name to target.",
@@ -58,10 +63,24 @@ export class InspectDependenciesTool implements Tool {
     required: ["objectName"],
   } as any;
 
-  async run(params: { objectName: string; includeColumns?: boolean; environment?: string; pool?: any }) {
-    const { objectName, includeColumns = false } = params;
+  async run(params: { objectName: string; includeColumns?: boolean; database?: string; environment?: string; pool?: any }) {
+    const { objectName, includeColumns = false, database, environment } = params;
 
     try {
+      // Validate database access if specified
+      if (database) {
+        const envManager = await getEnvironmentManager();
+        const dbCheck = envManager.isDatabaseAllowed(environment, database);
+        if (!dbCheck.allowed) {
+          return {
+            success: false,
+            object: objectName,
+            error: "DATABASE_ACCESS_DENIED",
+            message: dbCheck.reason || `Access to database '${database}' is not allowed.`,
+          };
+        }
+      }
+
       // Parse schema and object name
       const parts = objectName.split(".");
       let schemaName = "dbo";
@@ -82,11 +101,13 @@ export class InspectDependenciesTool implements Tool {
         };
       }
 
+      const usePrefix = database ? `USE [${database.replace(/]/g, "]]")}]; ` : "";
+
       // First, get the object type
       const objectTypeResult = await pool.request()
         .input("schema", sql.NVarChar, schemaName)
         .input("name", sql.NVarChar, objName)
-        .query(`
+        .query(`${usePrefix}
           SELECT
             o.type_desc AS objectType,
             o.object_id AS objectId
@@ -111,7 +132,7 @@ export class InspectDependenciesTool implements Tool {
       const referencedByResult = await pool.request()
         .input("schema", sql.NVarChar, schemaName)
         .input("name", sql.NVarChar, objName)
-        .query(`
+        .query(`${usePrefix}
           SELECT DISTINCT
             OBJECT_SCHEMA_NAME(d.referencing_id) AS referencingSchema,
             OBJECT_NAME(d.referencing_id) AS referencingName,
@@ -129,7 +150,7 @@ export class InspectDependenciesTool implements Tool {
       if (objectType === "USER_TABLE") {
         const fkResult = await pool.request()
           .input("objectId", sql.Int, objectId)
-          .query(`
+          .query(`${usePrefix}
             SELECT
               OBJECT_SCHEMA_NAME(fk.parent_object_id) AS referencingSchema,
               OBJECT_NAME(fk.parent_object_id) AS referencingTable,
@@ -147,7 +168,7 @@ export class InspectDependenciesTool implements Tool {
       const referencesResult = await pool.request()
         .input("schema", sql.NVarChar, schemaName)
         .input("name", sql.NVarChar, objName)
-        .query(`
+        .query(`${usePrefix}
           SELECT DISTINCT
             d.referenced_schema_name AS referencedSchema,
             d.referenced_entity_name AS referencedName,

@@ -1,6 +1,7 @@
-import sql from "mssql";
+import sql from "mssql/msnodesqlv8.js";
 import { Tool } from "@modelcontextprotocol/sdk/types.js";
 import { getEnvironmentManager } from "../config/EnvironmentManager.js";
+import { createRequest } from "../transactions/TransactionManager.js";
 
 export class ReadDataTool implements Tool {
   [key: string]: any;
@@ -323,8 +324,8 @@ export class ReadDataTool implements Tool {
         `Executing validated SELECT query${database ? ` on [${database}]` : ""}${limitAdded ? ` (auto-limited to ${maxRowsToUse} rows)` : ""}: ${limitedQuery.substring(0, 200)}${limitedQuery.length > 200 ? "..." : ""}`
       );
 
-      // Execute the query
-      const request = new sql.Request(params.pool);
+      // Execute the query (uses active transaction if one exists)
+      const request = createRequest(params);
       const result = await request.query(finalQuery);
 
       // Sanitize the result

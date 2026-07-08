@@ -1,4 +1,4 @@
-import sql from "mssql";
+import sql from "mssql/msnodesqlv8.js";
 
 export interface ActiveTransaction {
   transaction: sql.Transaction;
@@ -91,12 +91,25 @@ export class TransactionManager {
     }
 
     const operationCount = txn.operations.length;
+
     try {
+      // Yield to the event loop so the msnodesqlv8 ODBC driver can finish
+      // releasing the connection from the previous request.query() call.
+      await new Promise((resolve) => setImmediate(resolve));
       await txn.transaction.commit();
-    } finally {
       this.cleanup(envName);
+      return { operationCount };
+    } catch (commitError) {
+      // Rollback to prevent orphaned SQL Server transactions
+      // that hold exclusive locks indefinitely.
+      try {
+        await txn.transaction.rollback();
+      } catch {
+        // Rollback may also fail if the connection is in a bad state
+      }
+      this.cleanup(envName);
+      throw commitError;
     }
-    return { operationCount };
   }
 
   async rollback(envName: string): Promise<{ operationCount: number }> {

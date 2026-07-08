@@ -1,7 +1,7 @@
 import * as fs from "fs";
 import * as path from "path";
 import { InteractiveBrowserCredential } from "@azure/identity";
-import sql from "mssql";
+import sql from "mssql/msnodesqlv8.js";
 import { SecretResolver, SecretsConfig, createSecretResolver } from "./SecretResolver.js";
 import type { AuditSinkConfig } from "../audit/sinks/AuditSink.js";
 
@@ -15,7 +15,7 @@ export interface EnvironmentConfig {
   server: string;
   database: string;
   port?: number;
-  authMode: "sql" | "windows" | "aad";
+  authMode: "sql" | "windows" | "sspi" | "aad";
   username?: string;
   password?: string;
   domain?: string;
@@ -367,6 +367,19 @@ export class EnvironmentManager {
             trustServerCertificate: env.trustServerCertificate ?? false,
           },
         },
+      };
+    }
+
+    if (env.authMode === "sspi") {
+      return {
+        config: {
+          ...baseConfig,
+          options: {
+            trustedConnection: true,
+            encrypt: false,
+            trustServerCertificate: env.trustServerCertificate ?? true,
+          },
+        } as any,
       };
     }
 

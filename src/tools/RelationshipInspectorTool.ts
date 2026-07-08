@@ -1,9 +1,11 @@
-import sql from "mssql";
+import sql from "mssql/msnodesqlv8.js";
 import { Tool } from "@modelcontextprotocol/sdk/types.js";
+import { getEnvironmentManager } from "../config/EnvironmentManager.js";
 
 type RelationshipParams = {
   tableName: string;
   schemaName?: string;
+  database?: string;
   includeOutbound?: boolean;
   includeInbound?: boolean;
 };
@@ -68,6 +70,10 @@ export class RelationshipInspectorTool implements Tool {
         type: "boolean",
         description: "Include relationships where other tables reference this table (default true).",
       },
+      database: {
+        type: "string",
+        description: "Optional: Target database name for server-level access environments.",
+      },
       environment: {
         type: "string",
         description: "Optional environment name to target.",
@@ -80,11 +86,12 @@ export class RelationshipInspectorTool implements Tool {
     return typeof value === "boolean" ? value : fallback;
   }
 
-  private async ensureTableExists(schemaName: string, tableName: string, pool?: any) {
+  private async ensureTableExists(schemaName: string, tableName: string, pool?: any, database?: string) {
     const request = new sql.Request(pool);
     request.input("schemaName", sql.NVarChar, schemaName);
     request.input("tableName", sql.NVarChar, tableName);
-    const result = await request.query(`
+    const usePrefix = database ? `USE [${database.replace(/]/g, "]]")}]; ` : "";
+    const result = await request.query(`${usePrefix}
       SELECT 1
       FROM INFORMATION_SCHEMA.TABLES
       WHERE TABLE_SCHEMA = @schemaName AND TABLE_NAME = @tableName
@@ -115,12 +122,13 @@ export class RelationshipInspectorTool implements Tool {
     }));
   }
 
-  private async fetchRelationships(schemaName: string, tableName: string, direction: "outbound" | "inbound", pool?: any) {
+  private async fetchRelationships(schemaName: string, tableName: string, direction: "outbound" | "inbound", pool?: any, database?: string) {
     const request = new sql.Request(pool);
     request.input("schemaName", sql.NVarChar, schemaName);
     request.input("tableName", sql.NVarChar, tableName);
 
-    const baseQuery = `
+    const usePrefix = database ? `USE [${database.replace(/]/g, "]]")}]; ` : "";
+    const baseQuery = `${usePrefix}
       SELECT
         fk.CONSTRAINT_NAME AS constraintName,
         fk.UPDATE_RULE AS updateRule,
@@ -168,6 +176,8 @@ export class RelationshipInspectorTool implements Tool {
       }
 
       const schemaName = params.schemaName?.trim() || "dbo";
+      const database = params.database?.trim();
+      const environment = (params as any).environment;
       const includeOutbound = this.normalizeBool(params.includeOutbound, true);
       const includeInbound = this.normalizeBool(params.includeInbound, true);
 
@@ -178,18 +188,29 @@ export class RelationshipInspectorTool implements Tool {
         };
       }
 
+      if (database) {
+        const envManager = await getEnvironmentManager();
+        const dbCheck = envManager.isDatabaseAllowed(environment, database);
+        if (!dbCheck.allowed) {
+          return {
+            success: false,
+            message: dbCheck.reason || `Access to database '${database}' is not allowed.`,
+          };
+        }
+      }
+
       const pool = (params as any).pool;
-      const tableExists = await this.ensureTableExists(schemaName, tableName, pool);
+      const tableExists = await this.ensureTableExists(schemaName, tableName, pool, database);
       if (!tableExists) {
         return {
           success: false,
-          message: `Table [${schemaName}].[${tableName}] was not found.`,
+          message: `Table [${schemaName}].[${tableName}] was not found${database ? ` in database [${database}]` : ""}.`,
         };
       }
 
       const [outbound, inbound] = await Promise.all([
-        includeOutbound ? this.fetchRelationships(schemaName, tableName, "outbound", pool) : Promise.resolve([]),
-        includeInbound ? this.fetchRelationships(schemaName, tableName, "inbound", pool) : Promise.resolve([]),
+        includeOutbound ? this.fetchRelationships(schemaName, tableName, "outbound", pool, database) : Promise.resolve([]),
+        includeInbound ? this.fetchRelationships(schemaName, tableName, "inbound", pool, database) : Promise.resolve([]),
       ]);
 
       if ((!outbound || outbound.length === 0) && (!inbound || inbound.length === 0)) {

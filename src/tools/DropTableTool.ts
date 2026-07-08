@@ -1,4 +1,4 @@
-import sql from "mssql";
+import sql from "mssql/msnodesqlv8.js";
 import { Tool } from "@modelcontextprotocol/sdk/types.js";
 
 export class DropTableTool implements Tool {

@@ -1,5 +1,6 @@
-import sql from "mssql";
+import sql from "mssql/msnodesqlv8.js";
 import { Tool } from "@modelcontextprotocol/sdk/types.js";
+import { getEnvironmentManager } from "../config/EnvironmentManager.js";
 
 const clampEnvInt = (value: string | undefined, fallback: number, min: number, max: number) => {
   if (!value) {
@@ -18,6 +19,7 @@ const SAMPLE_RETURN_LIMIT = clampEnvInt(process.env.PROFILE_SAMPLE_RETURN_LIMIT,
 type ProfileParams = {
   tableName: string;
   schemaName?: string;
+  database?: string;
   sampleSize?: number;
   includeDistributions?: boolean;
   topValuesLimit?: number;
@@ -115,6 +117,10 @@ export class ProfileTableTool implements Tool {
         type: "array",
         items: { type: "string" },
         description: "Specific columns to profile (default: all)",
+      },
+      database: {
+        type: "string",
+        description: "Optional: Target database name for server-level access environments.",
       },
       environment: {
         type: "string",
@@ -229,6 +235,21 @@ export class ProfileTableTool implements Tool {
         return { success: false, message: "tableName is required." };
       }
 
+      const database = params.database?.trim();
+      const environment = (params as any).environment;
+
+      if (database) {
+        const envManager = await getEnvironmentManager();
+        const dbCheck = envManager.isDatabaseAllowed(environment, database);
+        if (!dbCheck.allowed) {
+          return {
+            success: false,
+            message: dbCheck.reason || `Access to database '${database}' is not allowed.`,
+          };
+        }
+      }
+
+      const usePrefix = database ? `USE [${database.replace(/]/g, "]]")}]; ` : "";
       const schemaName = params.schemaName?.trim() || "dbo";
       const sampleSize = this.normalizeLimit(params.sampleSize, DEFAULT_SAMPLE_SIZE, 1000);
       const includeDistributions = params.includeDistributions !== false;
@@ -241,8 +262,8 @@ export class ProfileTableTool implements Tool {
       metaRequest.input("schemaName", sql.NVarChar, schemaName);
       metaRequest.input("tableName", sql.NVarChar, tableName);
 
-      const metaResult = await metaRequest.query(`
-        SELECT 
+      const metaResult = await metaRequest.query(`${usePrefix}
+        SELECT
           c.COLUMN_NAME AS columnName,
           c.DATA_TYPE AS dataType,
           CASE WHEN c.IS_NULLABLE = 'YES' THEN 1 ELSE 0 END AS isNullable
@@ -279,7 +300,7 @@ export class ProfileTableTool implements Tool {
       // 2. Get total row count
       const countRequest = new sql.Request(pool);
       const fqTable = `${this.escapeIdentifier(schemaName)}.${this.escapeIdentifier(tableName)}`;
-      const countResult = await countRequest.query(`SELECT COUNT(*) AS cnt FROM ${fqTable}`);
+      const countResult = await countRequest.query(`${usePrefix}SELECT COUNT(*) AS cnt FROM ${fqTable}`);
       const rowCount = countResult.recordset[0]?.cnt ?? 0;
 
       let sampleRows: Record<string, unknown>[] | undefined;
@@ -306,7 +327,7 @@ export class ProfileTableTool implements Tool {
 
       if (includeSamples) {
         const sampleRequest = new sql.Request(pool);
-        const sampleQuery = `
+        const sampleQuery = `${usePrefix}
           SELECT TOP (${sampleSize}) *
           FROM ${fqTable}
           ORDER BY NEWID()
@@ -332,8 +353,8 @@ export class ProfileTableTool implements Tool {
 
         // Base stats: null count and distinct count
         const baseRequest = new sql.Request(pool);
-        const baseResult = await baseRequest.query(`
-          SELECT 
+        const baseResult = await baseRequest.query(`${usePrefix}
+          SELECT
             SUM(CASE WHEN ${colName} IS NULL THEN 1 ELSE 0 END) AS nullCount,
             COUNT(DISTINCT ${colName}) AS distinctCount
           FROM ${fqTable}
@@ -348,8 +369,8 @@ export class ProfileTableTool implements Tool {
         // Type-specific stats
         if (this.isNumericType(col.dataType)) {
           const numRequest = new sql.Request(pool);
-          const numResult = await numRequest.query(`
-            SELECT 
+          const numResult = await numRequest.query(`${usePrefix}
+            SELECT
               MIN(${colName}) AS minVal,
               MAX(${colName}) AS maxVal,
               AVG(CAST(${colName} AS FLOAT)) AS avgVal
@@ -365,7 +386,7 @@ export class ProfileTableTool implements Tool {
             };
 
             const percentileRequest = new sql.Request(pool);
-            const percentileResult = await percentileRequest.query(`
+            const percentileResult = await percentileRequest.query(`${usePrefix}
               SELECT TOP 1
                 PERCENTILE_CONT(0.5) WITHIN GROUP (ORDER BY ${colName}) OVER () AS medianVal,
                 PERCENTILE_CONT(0.9) WITHIN GROUP (ORDER BY ${colName}) OVER () AS p90Val
@@ -384,8 +405,8 @@ export class ProfileTableTool implements Tool {
           }
         } else if (this.isStringType(col.dataType)) {
           const strRequest = new sql.Request(pool);
-          const strResult = await strRequest.query(`
-            SELECT 
+          const strResult = await strRequest.query(`${usePrefix}
+            SELECT
               MIN(LEN(${colName})) AS minLength,
               MAX(LEN(${colName})) AS maxLength,
               AVG(CAST(LEN(${colName}) AS FLOAT)) AS avgLength,
@@ -404,8 +425,8 @@ export class ProfileTableTool implements Tool {
           }
         } else if (this.isDateType(col.dataType)) {
           const dateRequest = new sql.Request(pool);
-          const dateResult = await dateRequest.query(`
-            SELECT 
+          const dateResult = await dateRequest.query(`${usePrefix}
+            SELECT
               MIN(${colName}) AS earliest,
               MAX(${colName}) AS latest
             FROM ${fqTable}
@@ -427,7 +448,7 @@ export class ProfileTableTool implements Tool {
         if (includeDistributions && profile.distinctCount > 0 && profile.distinctCount <= rowCount) {
           const topRequest = new sql.Request(pool);
           topRequest.input("topLimit", sql.Int, topValuesLimit);
-          const topResult = await topRequest.query(`
+          const topResult = await topRequest.query(`${usePrefix}
             SELECT TOP (@topLimit)
               ${colName} AS value,
               COUNT(*) AS cnt

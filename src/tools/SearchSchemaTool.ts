@@ -1,5 +1,6 @@
-import sql from "mssql";
+import sql from "mssql/msnodesqlv8.js";
 import { Tool } from "@modelcontextprotocol/sdk/types.js";
+import { getEnvironmentManager } from "../config/EnvironmentManager.js";
 
 const clampEnvLimit = (value: string | undefined, fallback: number, max: number) => {
   if (!value) {
@@ -17,6 +18,7 @@ const SEARCH_DEFAULT_LIMIT = clampEnvLimit(process.env.SEARCH_SCHEMA_DEFAULT_LIM
 type SearchParams = {
   tablePattern?: string;
   columnPattern?: string;
+  database?: string;
   limit?: number;
   tableLimit?: number;
   columnLimit?: number;
@@ -78,6 +80,10 @@ export class SearchSchemaTool implements Tool {
       columnOffset: {
         type: "number",
         description: "Number of column rows to skip (for pagination)."
+      },
+      database: {
+        type: "string",
+        description: "Optional: Target database name for server-level access environments."
       },
       environment: {
         type: "string",
@@ -155,9 +161,9 @@ export class SearchSchemaTool implements Tool {
     return 1 - distance / maxLength;
   }
 
-  private async findSimilarTables(searchTerm: string, maxSuggestions: number, pool?: any) {
+  private async findSimilarTables(searchTerm: string, maxSuggestions: number, pool?: any, usePrefix = "") {
     const request = new sql.Request(pool);
-    const result = await request.query(`
+    const result = await request.query(`${usePrefix}
       SELECT TABLE_SCHEMA AS schemaName, TABLE_NAME AS tableName
       FROM INFORMATION_SCHEMA.TABLES
     `);
@@ -181,6 +187,21 @@ export class SearchSchemaTool implements Tool {
 
   async run(params: SearchParams): Promise<SearchResult> {
     try {
+      const database = params.database?.trim();
+      const environment = (params as any).environment;
+
+      if (database) {
+        const envManager = await getEnvironmentManager();
+        const dbCheck = envManager.isDatabaseAllowed(environment, database);
+        if (!dbCheck.allowed) {
+          return {
+            success: false,
+            message: dbCheck.reason || `Access to database '${database}' is not allowed.`,
+          };
+        }
+      }
+
+      const usePrefix = database ? `USE [${database.replace(/]/g, "]]")}]; ` : "";
       const rawTableSearch = this.stripWildcards(params.tablePattern);
       const tablePattern = this.normalizePattern(params.tablePattern);
       const columnPattern = this.normalizePattern(params.columnPattern);
@@ -209,7 +230,7 @@ export class SearchSchemaTool implements Tool {
       columnsRequest.input("columnOffset", sql.Int, columnOffset);
       columnsRequest.input("columnLimit", sql.Int, columnLimit);
 
-      const tablesQuery = `
+      const tablesQuery = `${usePrefix}
         SELECT TABLE_SCHEMA AS schemaName, TABLE_NAME AS tableName
         FROM INFORMATION_SCHEMA.TABLES
         WHERE (@tablePattern IS NULL OR TABLE_NAME LIKE @tablePattern)
@@ -221,7 +242,7 @@ export class SearchSchemaTool implements Tool {
         FROM INFORMATION_SCHEMA.TABLES
         WHERE (@tablePattern IS NULL OR TABLE_NAME LIKE @tablePattern)`;
 
-      const columnsQuery = `
+      const columnsQuery = `${usePrefix}
         SELECT TABLE_SCHEMA AS schemaName, TABLE_NAME AS tableName, COLUMN_NAME AS columnName, DATA_TYPE AS dataType
         FROM INFORMATION_SCHEMA.COLUMNS
         WHERE (@tablePattern IS NULL OR TABLE_NAME LIKE @tablePattern)
@@ -286,7 +307,7 @@ export class SearchSchemaTool implements Tool {
       );
 
       if (needsFuzzyTables && rawTableSearch) {
-        const fuzzySuggestions = await this.findSimilarTables(rawTableSearch, 10, pool);
+        const fuzzySuggestions = await this.findSimilarTables(rawTableSearch, 10, pool, usePrefix);
         if (fuzzySuggestions.length) {
           response.fuzzySuggestions = fuzzySuggestions;
           response.fuzzySearchTerm = rawTableSearch;
